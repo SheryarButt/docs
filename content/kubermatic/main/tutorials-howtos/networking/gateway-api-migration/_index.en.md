@@ -218,7 +218,7 @@ httpRoute:
   timeout: 3600s
 ```
 
-If the top-level `httpRoute.gatewayName` and `httpRoute.gatewayNamespace` are omitted, the installer defaults them to `spec.ingress.gateway.externalGateway` for master-scoped charts such as Dex. Seed-scoped IAP and MLA charts in separate seed setups are not defaulted from the master `externalGateway`; configure their `httpRoute.gatewayName` and `httpRoute.gatewayNamespace` explicitly for the seed Gateway.
+If the top-level `httpRoute.gatewayName` and `httpRoute.gatewayNamespace` are omitted, the installer defaults them to `spec.ingress.gateway.externalGateway` for master-scoped charts such as Dex. Seed-scoped IAP and MLA charts in separate seed setups are not defaulted from the master `externalGateway`; configure their `httpRoute.gatewayName` and `httpRoute.gatewayNamespace` explicitly for the seed Gateway. Note that the seed Gateway is not created by KKP; on separate seed clusters it is created and managed by the administrator. See [Gateway API on Separate Seed Clusters]({{< relref "../gateway-api-separate-seed/" >}}).
 
 Run the installer:
 
@@ -294,7 +294,7 @@ kubermatic-installer deploy kubermatic-master --clean-nginx-lb [other options]
 
 If `spec.ingress.gateway.externalGateway` is configured, the installer does not deploy the bundled Envoy Gateway controller. In that mode, any Gateway controller used by the external Gateway must already be installed and maintained outside of KKP, and the legacy nginx release must be removed manually with `helm uninstall nginx-ingress-controller -n nginx-ingress-controller`.
 
-Separate seed clusters: the `kubermatic-seed` stack does not clean up a legacy nginx-ingress-controller installation. If nginx was deployed on separate seeds, remove it there manually.
+Separate seed clusters: the `kubermatic-seed` stack does not clean up a legacy nginx-ingress-controller installation. If nginx was deployed on separate seeds, remove it there manually. For the seed-side Gateway API setup, see [Gateway API on Separate Seed Clusters]({{< relref "../gateway-api-separate-seed/" >}}).
 
 ### Cleanup of Old Resources
 
