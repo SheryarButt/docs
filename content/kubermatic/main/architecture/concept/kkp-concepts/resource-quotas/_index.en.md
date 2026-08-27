@@ -14,6 +14,7 @@ The resources in question are the resources of the user cluster:
 - CPU - the cumulated CPU used by the nodes on all clusters.
 - Memory - the cumulated RAM used by the nodes on all clusters.
 - Storage - the cumulated disk size of the nodes on all clusters.
+- Accelerators (alpha) - the cumulated KubeVirt VM accelerator devices across all clusters in an activated project.
 
 This feature is available in the EE edition only.
 
@@ -53,7 +54,7 @@ set in the ResourceQuota is done automatically by the API.
 
 ## Calculating Quota Usage
 
-The ResourceQuota has 2 status fields:
+The ResourceQuota has two usage fields in its status:
 
 - `globalUsage` which shows the resource usage across all seeds
 - `localUsage` which shows the resource usage on the local seed
@@ -113,6 +114,154 @@ Furthermore, a project quota widget of the active project is visible in the dash
 
 ![Quota Widget](images/widget.png?classes=shadow,border "Quota Widget")
 
+## KubeVirt Accelerator Quotas (Alpha)
+
+KubeVirt accelerator quotas add provider specific GPU and host device limits to project ResourceQuotas. KKP aggregates the
+devices requested by KubeVirt Machines across user clusters and Seeds, then enforces the project limits when new Machines are
+created.
+
+{{% notice warning %}}
+This feature is alpha, available only in Kubermatic EE, and disabled by default.
+{{% /notice %}}
+
+### Enable the Feature Gate
+
+Enable the `KubeVirtAcceleratorQuota` feature gate in the `KubermaticConfiguration`:
+
+```yaml
+apiVersion: kubermatic.k8c.io/v1
+kind: KubermaticConfiguration
+metadata:
+  name: kubermatic
+  namespace: kubermatic
+spec:
+  featureGates:
+    KubeVirtAcceleratorQuota: true
+```
+
+The feature gate makes accelerator accounting available, but it does not activate projects. Activate each project through its
+ResourceQuota.
+
+### Activate Accelerator Accounting for a Project
+
+Activation requires an existing, explicitly managed project ResourceQuota with an absent or empty
+`spec.quota.accelerators` list. Activation cannot be part of ResourceQuota creation. If the quota is a default one, override it
+in a separate update first.
+
+For the initial test, use a dedicated project, for example **Data Science**. Accelerator accounting is activated independently
+for each project.
+
+### Use the Dashboard
+
+1. Create the **Data Science** project.
+2. In the **Admin Panel**, open **Manage Resources** > **Project Quotas**.
+3. Create a quota for **Data Science**. If a **Default** quota already exists, change a CPU, memory, or disk value and save it,
+   then reopen the quota before activation.
+4. Select the quota's edit (pencil) action, enable **Enable Accelerator Quota**, and select **Save Changes**.
+5. Wait until the **Accelerator** status becomes `Ready` before adding limits.
+
+Repeat quota creation and activation separately for every project that should use accelerator quotas.
+
+When accounting becomes `Ready`, edit the quota again to add accelerator names and limits. The **Accelerator** column's status
+icon and tooltip show the phase, and the project quota widget shows accelerator usage and limits.
+
+### Use kubectl
+
+With the KKP master cluster kubeconfig, find the quota by Project ID and set its name:
+
+```bash
+PROJECT_ID="tjqjkphnm6"
+kubectl get resourcequotas.kubermatic.k8c.io \
+  -l "subject-name=${PROJECT_ID},subject-kind=project"
+
+RESOURCE_QUOTA_NAME="project-tjqjkphnm6"
+```
+
+For a default quota, remove the default label in a separate update:
+
+```bash
+kubectl label resourcequotas.kubermatic.k8c.io "$RESOURCE_QUOTA_NAME" \
+  kkp-default-resource-quota-
+```
+
+Activate accounting:
+
+```bash
+kubectl annotate resourcequotas.kubermatic.k8c.io "$RESOURCE_QUOTA_NAME" \
+  accelerators.kubermatic.io/accounting-enabled=true
+```
+
+### Verify Activation
+
+Wait until the Dashboard shows the **Accelerator** status as `Ready`, or check it with:
+
+```bash
+kubectl get resourcequotas.kubermatic.k8c.io "$RESOURCE_QUOTA_NAME" \
+  -o jsonpath='{.status.globalAcceleratorAccounting.activationPhase}{"\n"}'
+```
+
+The expected result is `Ready`. If the phase is `Blocked`, inspect the reported blockers:
+
+```bash
+kubectl get resourcequotas.kubermatic.k8c.io "$RESOURCE_QUOTA_NAME" -o yaml
+```
+
+Existing KubeVirt Machines created before activation may need to be recreated before accounting becomes `Ready`.
+
+### Configure Accelerator Limits
+
+After accounting is `Ready`, update the existing ResourceQuota so its `spec.quota` includes the accelerator limit. Preserve its
+existing CPU, memory, and storage values:
+
+```yaml
+spec:
+  quota:
+    cpu: "100"
+    memory: 500G
+    storage: 350G
+    accelerators:
+      - provider: kubevirt
+        resources:
+          nvidia.com/TU104GL_Tesla_T4: "4"
+```
+
+The alpha API accepts one provider entry: `kubevirt`. Each resource key must exactly match the qualified, case-sensitive
+`deviceName` used by the KubeVirt GPU or host device. Quantities must be non-negative whole numbers:
+
+- A positive value sets the project-wide limit for that device name.
+- Zero denies new Machines that request that device.
+- An omitted provider or resource name is unconstrained; the map is not an allowlist.
+
+If a Machine selects an instancetype, it must resolve to a live, named `v1beta1` VirtualMachineInstancetype or
+VirtualMachineClusterInstancetype. A Machine without one receives an empty footprint. `revisionName` and instancetype inference
+from a volume are not supported.
+
+Changing limits starts a new accounting revision.
+
+### Readiness and Lifecycle
+
+Usage is stored in `status.globalUsage.accelerators`, readiness and blockers are stored in
+`status.globalAcceleratorAccounting`. Inspect both with:
+
+```bash
+kubectl get resourcequotas.kubermatic.k8c.io "$RESOURCE_QUOTA_NAME" -o yaml
+```
+
+- `Activating` means KKP is waiting for reports for the current revision.
+- `Ready` means all required reports are compatible and fresh.
+- `Blocked` includes details in `status.globalAcceleratorAccounting.blockers`.
+
+With non-empty limits, new KubeVirt Machine `CREATE` requests fail closed unless accounting is `Ready`.
+
+The annotation cannot be removed or set to `false`, disabling the feature gate does not
+deactivate the project, and the ResourceQuota cannot be deleted while its Project exists and is not terminating.
+
+To stop limit enforcement while keeping accounting active, set `spec.quota.accelerators: []`.
+
+Accelerator accounting records requested Machine intent. It does not discover physical devices or install GPU operators,
+drivers, device plugins, or KubeVirt permitted host devices. The concurrent Machine creation race described below also applies
+because admission does not reserve usage atomically.
+
 ## Some Additional Information
 
 {{% notice note %}}
@@ -163,3 +312,6 @@ Unsetting this field will delete all the default ResourceQuotas.
 To distinguish a ResourceQuota from a default ResourceQuota, the label `"kkp-default-resource-quota": "true"` is set on the
 default ResourceQuotas. To mark the ResourceQuota as non-default, just remove the label. When a default ResourceQuota is
 edited through the UI/API, this will be done automatically.
+
+Accelerator limits cannot be configured in `spec.defaultQuota`. They must be configured on an explicitly managed project
+ResourceQuota after accelerator accounting has been activated and has become ready.
